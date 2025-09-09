@@ -71,6 +71,8 @@ class ModelMcpBridge(Star):
                 response.tools_call_name = [resp_json["tool"]]
                 response.tools_call_args = [resp_json["parameters"]]
                 response.tools_call_ids = [resp_json["call_id"]]
+                response.result_chain = None
+                response.completion_text = ""
                 AGENT_STORAGE.get_agent()._transition_state(AgentState.RUNNING)
         except json.JSONDecodeError:
             pass
