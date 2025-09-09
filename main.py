@@ -58,8 +58,8 @@ class ModelMcpBridge(Star):
             jsonData = json.dumps(toolSet.openai_schema())
 
             if hasattr(request, 'system_prompt'):
-                request.system_prompt += f"\n\nThe following tools are available:\n{jsonData}\n\nUse the tools when necessary."
-                request.system_prompt += "\n\nIf you use a tool, respond with the following format:\n{\n  \"tool\": \"tool_name\",\n  \"parameters\": {\n    \"param1\": \"value1\",\n    \"param2\": \"value2\"\n  }\n  \"call_id\":\"call_24CHaracterLOngSTRPlains\"\n}\n\nIf you use a tool, respond with correct json format, and do NOT add any other things.\nIf you do not need to use a tool, respond normally."
+                request.system_prompt += f"\n\nAvailable tools:\n{jsonData}\n\nUse tools when necessary."
+                request.system_prompt += "\n\nWhen using a tool, respond with ONLY the following JSON format (no additional text, no markdown, no explanations):\n{\n  \"tool\": \"tool_name\",\n  \"parameters\": {\n    \"param1\": \"value1\",\n    \"param2\": \"value2\"\n  },\n  \"call_id\": \"call_24CHaracterLOngSTRPlains\"\n}\n\nImportant rules:\n1. When using a tool: Output ONLY the raw JSON, nothing else\n2. No markdown, no code blocks, no surrounding text of any kind\n3. Call exactly ONE tool per response\n4. When not using tools: Respond normally to the user's request"
 
     @filter.on_llm_response()
     async def test(self, event: AstrMessageEvent, response: LLMResponse) -> None:
