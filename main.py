@@ -57,7 +57,6 @@ class ModelMcpBridge(Star):
         """
         self._transition_state_backup=ToolLoopAgentRunner._transition_state
         ToolLoopAgentRunner._transition_state=_patched_transition_state
-        tool_loop_agent_runner.AGENT=None
 
     # 注册指令的装饰器。指令名为 mcpbridge。注册成功后，发送 `/mcpbridge` 就会触发这个指令，并回复 `你好, {user_name}!`
     @filter.command("mcpbridge")
