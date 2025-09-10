@@ -1,9 +1,9 @@
 import json
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
-from astrbot.api import logger,FunctionTool,ToolSet
-from astrbot.api.provider import ProviderRequest, LLMResponse
-from dataclasses import field
+from astrbot.api import logger, FunctionTool, ToolSet
+from astrbot.api.provider import ProviderRequest, LLMResponse, Provider
+from dataclasses import dataclass, field
 
 from astrbot.core.provider.func_tool_manager import FunctionToolManager
 from astrbot.core.agent.runners.base import AgentState
@@ -68,7 +68,8 @@ class ModelMcpBridge(Star):
     @filter.on_llm_request(priority=-10001)
     async def onLlmRequest(self, event: AstrMessageEvent, request: ProviderRequest) -> None:
         """这是一个在 LLM 请求时触发的事件"""
-        if not await self.is_model_tool_use_support(request.model):
+        provider=self.context.get_using_provider(event.unified_msg_origin)
+        if not await self.is_model_tool_use_support(provider, request.model):
             logger.info("Model does not support tool_use, ModelMcpBridge Hooking.")
             toolSet: FunctionToolManager | ToolSet | None = request.func_tool
             if isinstance(toolSet, FunctionToolManager):
@@ -107,24 +108,24 @@ class ModelMcpBridge(Star):
             logger.debug(f"Response is not valid JSON, skipping tool call conversion.RAW response:{resp}")
             pass
 
-    async def is_model_tool_use_support(self, model_name: str) -> bool:
+    async def is_model_tool_use_support(self, provider: Provider, model: str) -> bool:
         """检查模型是否支持 tool_use 的示例函数"""
-        if model_name not in self.ModelSupportToolUse:
-            provider=self.context.get_provider_by_id(model_name)
-            if provider:
-                MockToolset=ToolSet([MockTool()])
-                llm_resp = await provider.text_chat(
-                    prompt="Call the mock tool with random string",
-                    system_prompt="You are a helpful assistant that can use tools.",
-                    func_tool=MockToolset
-                )
+        key=provider.meta().id+"_"+model
+        if key not in self.ModelSupportToolUse:
+            MockToolset=ToolSet([MockTool()])
+            llm_resp = await provider.text_chat(
+                prompt="What is the temperature of my CPU?",
+                system_prompt="You are a helpful assistant. Use get_cpu_temperature tool to answer the question.",
+                func_tool=MockToolset,
+                model=model
+            )
 
-                if MockTool.name not in llm_resp.tools_call_name:
-                    self.ModelSupportToolUse[model_name]=False
-                else:
-                    self.ModelSupportToolUse[model_name]=True
+            if MockTool.name not in llm_resp.tools_call_name:
+                self.ModelSupportToolUse[key]=False
+            else:
+                self.ModelSupportToolUse[key]=True
 
-        return self.ModelSupportToolUse.get(model_name, False)
+        return self.ModelSupportToolUse.get(key, False)
 
     async def terminate(self):
         """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
@@ -150,15 +151,16 @@ def _patched_transition_state(self, new_state: AgentState) -> None:
         logger.debug(f"Agent state transition: {self._state} -> {new_state}")
         self._state = new_state
 
+@dataclass
 class MockTool(FunctionTool):
-    name: str = "mock_tool"
-    description: str = "这是一个模拟工具，用于测试模型是否支持 tool_use 功能。"
+    name: str = "get_cpu_temperature"
+    description: str = "A tool to get the current CPU temperature of the user's device."
     parameters: dict = field(default_factory=lambda: {
         "type": "object",
         "properties": {
             "input": {
                 "type": "string",
-                "description": "Random input string"
+                "description": "Random input string to avoid caching"
             }
         },
         "required": ["input"]
