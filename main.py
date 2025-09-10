@@ -120,6 +120,8 @@ class ModelMcpBridge(Star):
 
     async def is_model_tool_use_support(self, provider: Provider, model: str) -> bool:
         """检查模型是否支持 tool_use 的示例函数"""
+        if model is None:
+            model=""
         key=provider.meta().id+"_"+model
         if key not in self.ModelSupportToolUse:
             MockToolset=ToolSet([MockTool()])
