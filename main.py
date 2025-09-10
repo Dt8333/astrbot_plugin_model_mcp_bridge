@@ -48,7 +48,7 @@ class ModelMcpBridge(Star):
     async def onLlmRequest(self, event: AstrMessageEvent, request: ProviderRequest) -> None:
         """这是一个在 LLM 请求时触发的事件"""
         if not await self.is_model_tool_use_support(request.model):
-            print("Model does not support tool_use, ModelMcpBridge Hooking.")
+            logger.info("Model does not support tool_use, ModelMcpBridge Hooking.")
             toolSet: FunctionToolManager | ToolSet | None = request.func_tool
             if isinstance(toolSet, FunctionToolManager):
                 request.func_tool = toolSet.get_full_tool_set()
@@ -78,6 +78,7 @@ class ModelMcpBridge(Star):
                 response.completion_text = ""
                 AGENT_STORAGE.get_agent()._transition_state(AgentState.RUNNING)
         except json.JSONDecodeError:
+            logger.debug(f"Response is not valid JSON, skipping tool call conversion.RAW response:{resp}")
             pass
 
     async def is_model_tool_use_support(self, model_name: str) -> bool:
