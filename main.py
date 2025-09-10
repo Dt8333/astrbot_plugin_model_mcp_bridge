@@ -88,8 +88,8 @@ class ModelMcpBridge(Star):
 
     @filter.on_llm_response()
     async def onLlmResponse(self, event: AstrMessageEvent, response: LLMResponse) -> None:
+        """这是一个在 LLM 响应时触发的事件"""
         if response.result_chain is not None:
-            """这是一个在 LLM 响应时触发的事件"""
             resp=response.result_chain.get_plain_text()
             for resp_json in extract_json(resp):
                 if "tool" in resp_json and "parameters" in resp_json:
