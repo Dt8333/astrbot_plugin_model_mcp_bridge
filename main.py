@@ -93,7 +93,7 @@ class ModelMcpBridge(Star):
             resp=response.result_chain.get_plain_text()
             for resp_json in extract_json(resp):
                 if "tool" in resp_json and "parameters" in resp_json:
-                    print("Model calling tool by ModelMcpBridge, Converting.")
+                    logger.info("Model calling tool by ModelMcpBridge, Converting.")
                     response.tools_call_name = [resp_json["tool"]]
                     response.tools_call_args = [resp_json["parameters"]]
                     response.tools_call_ids = [resp_json["call_id"]]
