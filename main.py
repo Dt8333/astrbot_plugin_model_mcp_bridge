@@ -62,10 +62,13 @@ class ModelMcpBridge(Star):
                 request.system_prompt += "\n\nWhen using a tool, respond with ONLY the following JSON format (no additional text, no markdown, no explanations):\n{\n  \"tool\": \"tool_name\",\n  \"parameters\": {\n    \"param1\": \"value1\",\n    \"param2\": \"value2\"\n  },\n  \"call_id\": \"call_24CHaracterLOngSTRPlains\"\n}\n\nImportant rules:\n1. When using a tool: Output ONLY the raw JSON, nothing else\n2. No markdown, no code blocks, no surrounding text of any kind\n3. Call exactly ONE tool per response\n4. When not using tools: Respond normally to the user's request"
 
     @filter.on_llm_response()
-    async def test(self, event: AstrMessageEvent, response: LLMResponse) -> None:
+    async def onLlmResponse(self, event: AstrMessageEvent, response: LLMResponse) -> None:
+        if response.result_chain is None:
+            return
         """这是一个在 LLM 响应时触发的事件"""
+        resp=response.result_chain.get_plain_text()
         try:
-            resp_json = json.loads(response.result_chain.get_plain_text())
+            resp_json = json.loads(resp)
             if "tool" in resp_json and "parameters" in resp_json:
                 print("Model calling tool by ModelMcpBridge, Converting.")
                 response.tools_call_name = [resp_json["tool"]]
