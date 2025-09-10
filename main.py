@@ -51,8 +51,8 @@ class ModelMcpBridge(Star):
             print("Model does not support tool_use, ModelMcpBridge Hooking.")
             toolSet: FunctionToolManager | ToolSet | None = request.func_tool
             if isinstance(toolSet, FunctionToolManager):
-                request.func_tool = tool_set.get_full_tool_set()
-                tool_set = request.func_tool
+                request.func_tool = toolSet.get_full_tool_set()
+                toolSet = request.func_tool
 
             """Serialize the tool set to JSON format"""
             jsonData = json.dumps(toolSet.openai_schema())
@@ -85,7 +85,7 @@ class ModelMcpBridge(Star):
         if model_name not in self.ModelSupportToolUse:
             provider=self.context.get_provider_by_id(model_name)
             if provider:
-                MockToolset=ToolSet(FunctionTool)
+                MockToolset=ToolSet([MockTool()])
                 llm_resp = await provider.text_chat(
                     prompt="Call the mock tool with random string",
                     system_prompt="You are a helpful assistant that can use tools.",
