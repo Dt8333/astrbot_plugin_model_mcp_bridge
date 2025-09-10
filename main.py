@@ -27,13 +27,17 @@ class AgentStorage:
     用于临时储存Agent实例，以便在onLlmResponse中调用其_transition_state方法
     """
     def __init__(self):
-        self.agent=None
+        self.agent={}
 
-    def set_agent(self,agent):
-        self.agent=agent
+    def set_agent(self, id, agent):
+        self.agent[id]=agent
 
-    def get_agent(self):
-        return self.agent
+    def get_agent(self, id):
+        return self.agent[id]
+
+    def remove_agent(self, id):
+        if id in self.agent:
+            del self.agent[id]
 
 AGENT_STORAGE=AgentStorage()
 
@@ -85,28 +89,32 @@ class ModelMcpBridge(Star):
 
     @filter.on_llm_response()
     async def onLlmResponse(self, event: AstrMessageEvent, response: LLMResponse) -> None:
-        if response.result_chain is None:
-            return
-        """这是一个在 LLM 响应时触发的事件"""
-        resp=response.result_chain.get_plain_text()
-        try:
-            resp_json = json.loads(resp)
-            if "tool" in resp_json and "parameters" in resp_json:
-                print("Model calling tool by ModelMcpBridge, Converting.")
-                response.tools_call_name = [resp_json["tool"]]
-                response.tools_call_args = [resp_json["parameters"]]
-                response.tools_call_ids = [resp_json["call_id"]]
-                response.result_chain = None
-                response.completion_text = ""
+        if response.result_chain is not None:
+            """这是一个在 LLM 响应时触发的事件"""
+            resp=response.result_chain.get_plain_text()
+            try:
+                resp_json = json.loads(resp)
+                if "tool" in resp_json and "parameters" in resp_json:
+                    print("Model calling tool by ModelMcpBridge, Converting.")
+                    response.tools_call_name = [resp_json["tool"]]
+                    response.tools_call_args = [resp_json["parameters"]]
+                    response.tools_call_ids = [resp_json["call_id"]]
+                    response.result_chain = None
+                    response.completion_text = ""
 
-                """
-                PART OF MONKEY PATCH
-                调用存储的Agent实例的_transition_state方法，将状态设置为RUNNING，以继续处理工具调用
-                """
-                AGENT_STORAGE.get_agent()._transition_state(AgentState.RUNNING)
-        except json.JSONDecodeError:
-            logger.debug(f"Response is not valid JSON, skipping tool call conversion.RAW response:{resp}")
-            pass
+                    """
+                    PART OF MONKEY PATCH
+                    调用存储的Agent实例的_transition_state方法，将状态设置为RUNNING，以继续处理工具调用
+                    """
+                    AGENT_STORAGE.get_agent(response.raw_completion.id)._transition_state(AgentState.RUNNING)
+            except json.JSONDecodeError:
+                logger.debug(f"Response is not valid JSON, skipping tool call conversion.RAW response:{resp}")
+                pass
+        """
+        PART OF MONKEY PATCH
+        从AgentStorage中移除已处理的Agent实例
+        """
+        AGENT_STORAGE.remove_agent(response.raw_completion.id)
 
     async def is_model_tool_use_support(self, provider: Provider, model: str) -> bool:
         """检查模型是否支持 tool_use 的示例函数"""
@@ -147,7 +155,7 @@ def _patched_transition_state(self, new_state: AgentState) -> None:
     """转换 Agent 状态"""
     if self._state != new_state:
         if self._state == AgentState.RUNNING and new_state == AgentState.DONE:
-            AGENT_STORAGE.set_agent(self)
+            AGENT_STORAGE.set_agent(self.final_llm_resp.raw_completion.id,self)
         logger.debug(f"Agent state transition: {self._state} -> {new_state}")
         self._state = new_state
 
