@@ -10,7 +10,22 @@ from astrbot.core.agent.runners.base import AgentState
 from astrbot.core.agent.runners import tool_loop_agent_runner
 from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
 
+"""
+实现思路：
+在 onLlmRequest 中检测模型是否支持 tool_use，如果不支持，则将工具集序列化为 JSON，并将其添加到 system_prompt 中，指导模型如何调用工具。
+在 onLlmResponse 中解析模型的响应，如果检测到模型尝试调用工具（通过解析 JSON 格式的响应），则将其转换为 AstrBot 的工具调用格式。
+如果模型不支持 tool_use，则通过补丁的方式修改 ToolLoopAgentRunner 的 _transition_state 方法，以便在工具调用后正确地继续处理。
+需要注意的是，这种方法依赖于模型能够理解并遵循 system_prompt 中的指示，因此效果可能会因模型而异。
+
+改进方向：
+等待合适的接口，能够在AGENT-RUNNING->AGENT-DONE或所有状态变化前hook，从而不必在onLlmResponse中调用_transition_state
+"""
+
 class AgentStorage:
+    """
+    #PART OF MONKEY PATCH
+    用于临时储存Agent实例，以便在onLlmResponse中调用其_transition_state方法
+    """
     def __init__(self):
         self.agent=None
 
@@ -30,6 +45,12 @@ class ModelMcpBridge(Star):
     async def initialize(self):
         """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
         self.ModelSupportToolUse={} # 用于存储模型是否支持 tool_use 的字典，key 为模型名，value 为布尔值
+
+        """
+        PART OF MONKEY PATCH
+        用自定义的_transition_state方法替换ToolLoopAgentRunner的_transition_state方法
+        以便在状态转换时捕获Agent实例
+        """
         self._transition_state_backup=ToolLoopAgentRunner._transition_state
         ToolLoopAgentRunner._transition_state=_patched_transition_state
         tool_loop_agent_runner.AGENT=None
@@ -76,6 +97,11 @@ class ModelMcpBridge(Star):
                 response.tools_call_ids = [resp_json["call_id"]]
                 response.result_chain = None
                 response.completion_text = ""
+
+                """
+                PART OF MONKEY PATCH
+                调用存储的Agent实例的_transition_state方法，将状态设置为RUNNING，以继续处理工具调用
+                """
                 AGENT_STORAGE.get_agent()._transition_state(AgentState.RUNNING)
         except json.JSONDecodeError:
             logger.debug(f"Response is not valid JSON, skipping tool call conversion.RAW response:{resp}")
@@ -102,10 +128,21 @@ class ModelMcpBridge(Star):
 
     async def terminate(self):
         """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
+
+        """
+        PART OF MONKEY PATCH
+        恢复ToolLoopAgentRunner的_transition_state方法，以使其能在插件卸载后正常工作
+        """
         ToolLoopAgentRunner._transition_state=self._transition_state_backup
 
 
 def _patched_transition_state(self, new_state: AgentState) -> None:
+    """
+    PART OF MONKEY PATCH
+    修改后的_transition_state方法
+    用于捕获Agent实例
+    """
+
     """转换 Agent 状态"""
     if self._state != new_state:
         if self._state == AgentState.RUNNING and new_state == AgentState.DONE:
