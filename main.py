@@ -91,8 +91,7 @@ class ModelMcpBridge(Star):
         if response.result_chain is not None:
             """这是一个在 LLM 响应时触发的事件"""
             resp=response.result_chain.get_plain_text()
-            try:
-                resp_json = json.loads(resp)
+            for resp_json in extract_json(resp):
                 if "tool" in resp_json and "parameters" in resp_json:
                     print("Model calling tool by ModelMcpBridge, Converting.")
                     response.tools_call_name = [resp_json["tool"]]
@@ -106,9 +105,7 @@ class ModelMcpBridge(Star):
                     调用存储的Agent实例的_transition_state方法，将状态设置为RUNNING，以继续处理工具调用
                     """
                     AGENT_STORAGE.get_agent(response.raw_completion.id)._transition_state(AgentState.RUNNING)
-            except json.JSONDecodeError:
-                logger.debug(f"Response is not valid JSON, skipping tool call conversion.RAW response:{resp}")
-                pass
+
         """
         PART OF MONKEY PATCH
         从AgentStorage中移除已处理的Agent实例
@@ -143,6 +140,26 @@ class ModelMcpBridge(Star):
         """
         ToolLoopAgentRunner._transition_state=self._transition_state_backup
 
+def RawJSONDecoder(index):
+    class _RawJSONDecoder(json.JSONDecoder):
+        end = None
+
+        def decode(self, s, *_):
+            data, self.__class__.end = self.raw_decode(s, index)
+            return data
+    return _RawJSONDecoder
+
+"""
+工具类
+解析JSON字符串
+"""
+def extract_json(s, index=0):
+    while (index := s.find('{', index)) != -1:
+        try:
+            yield json.loads(s, cls=(decoder := RawJSONDecoder(index)))
+            index = decoder.end
+        except json.JSONDecodeError:
+            index += 1
 
 def _patched_transition_state(self, new_state: AgentState) -> None:
     """
