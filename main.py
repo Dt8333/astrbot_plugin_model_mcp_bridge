@@ -89,34 +89,28 @@ class ModelMcpBridge(Star):
     @filter.on_llm_response()
     async def onLlmResponse(self, event: AstrMessageEvent, response: LLMResponse) -> None:
         """这是一个在 LLM 响应时触发的事件"""
-        if AGENT_STORAGE.get_agent(response.raw_completion.id) is None:
-            return
-
         if response.result_chain is not None:
-            try:
-                resp=response.result_chain.get_plain_text()
-                for resp_json in extract_json(resp):
-                    if "tool" in resp_json and "parameters" in resp_json:
-                        logger.info("Model calling tool by ModelMcpBridge, Converting.")
-                        response.tools_call_name = [resp_json["tool"]]
-                        response.tools_call_args = [resp_json["parameters"]]
-                        response.tools_call_ids = [resp_json["call_id"]]
-                        response.result_chain = None
-                        response.completion_text = ""
+            resp=response.result_chain.get_plain_text()
+            for resp_json in extract_json(resp):
+                if "tool" in resp_json and "parameters" in resp_json:
+                    print("Model calling tool by ModelMcpBridge, Converting.")
+                    response.tools_call_name = [resp_json["tool"]]
+                    response.tools_call_args = [resp_json["parameters"]]
+                    response.tools_call_ids = [resp_json["call_id"]]
+                    response.result_chain = None
+                    response.completion_text = ""
 
-                        """
-                        PART OF MONKEY PATCH
-                        调用存储的Agent实例的_transition_state方法，将状态设置为RUNNING，以继续处理工具调用
-                        """
-                        AGENT_STORAGE.get_agent(response.raw_completion.id)._transition_state(AgentState.RUNNING)
-            except Exception as e:
-                logger.error(f"Error occurred while parsing response: {e}")
+                    """
+                    PART OF MONKEY PATCH
+                    调用存储的Agent实例的_transition_state方法，将状态设置为RUNNING，以继续处理工具调用
+                    """
+                    AGENT_STORAGE.get_agent(id(response))._transition_state(AgentState.RUNNING)
 
         """
         PART OF MONKEY PATCH
         从AgentStorage中移除已处理的Agent实例
         """
-        AGENT_STORAGE.remove_agent(response.raw_completion.id)
+        AGENT_STORAGE.remove_agent(id(response))
 
     async def is_model_tool_use_support(self, provider: Provider, model: str) -> bool:
         """检查模型是否支持 tool_use 的示例函数"""
@@ -179,7 +173,7 @@ def _patched_transition_state(self, new_state: AgentState) -> None:
     """转换 Agent 状态"""
     if self._state != new_state:
         if self._state == AgentState.RUNNING and new_state == AgentState.DONE:
-            AGENT_STORAGE.set_agent(self.final_llm_resp.raw_completion.id,self)
+            AGENT_STORAGE.set_agent(id(self.final_llm_resp), self)
         logger.debug(f"Agent state transition: {self._state} -> {new_state}")
         self._state = new_state
 
