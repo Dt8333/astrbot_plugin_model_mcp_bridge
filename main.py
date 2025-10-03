@@ -105,7 +105,7 @@ class ModelMcpBridge(Star):
                 request.system_prompt += (
                     f"\n\nAvailable tools:\n{jsonData}\n\nUse tools when necessary."
                 )
-                request.system_prompt += '\n\nWhen using a tool, you can choose one of the following formats:\n\n**Format 1 - JSON (preferred):**\n{\n  "tool": "tool_name",\n  "parameters": {\n    "param1": "value1",\n    "param2": "value2"\n  },\n  "call_id": "call_24CHaracterLOngSTRPlains"\n}\n\n**Format 2 - tool_code (alternative):**\n```tool_code\nprint(default_api.tool_name(param1="value1", param2="value2"))\n```\n\nImportant rules:\n1. When using a tool: Output ONLY the tool call in one of the above formats, nothing else\n2. For JSON format: No markdown, no code blocks, no surrounding text\n3. For tool_code format: Use proper Python function call syntax with print() wrapper and default_api prefix\n4. Call exactly ONE tool per response\n5. When not using tools: Respond normally to the user\'s request\n\nExamples:\n- JSON: {"tool": "search_web", "parameters": {"query": "weather today"}, "call_id": "call_123"}\n- tool_code: ```tool_code\nprint(default_api.search_web(query="weather today"))\n```'
+                request.system_prompt += '\n\nWhen using a tool, use the following JSON format:\n\n{\n  "tool": "tool_name",\n  "parameters": {\n    "param1": "value1",\n    "param2": "value2"\n  },\n  "call_id": "call_24CHaracterLOngSTRPlains"\n}\n\nImportant rules:\n1. When using a tool: Output ONLY the tool call in JSON format, nothing else\n2. No markdown, no code blocks, no surrounding text\n3. Call exactly ONE tool per response\n4. When not using tools: Respond normally to the user\'s request\n\nExample: {"tool": "search_web", "parameters": {"query": "weather today"}, "call_id": "call_123"}'
 
     @filter.on_llm_response()
     async def onLlmResponse(
@@ -115,47 +115,33 @@ class ModelMcpBridge(Star):
         if response.result_chain is not None:
             resp = response.result_chain.get_plain_text()
 
-            # 首先尝试解析 Gemini 的 tool_code 格式
-            tool_call_info = _parse_gemini_tool_call(resp)
-            if tool_call_info:
-                logger.debug("resp: " + resp)
-                logger.info(
-                    "Model calling tool by ModelMcpBridge (Gemini format), Converting."
-                )
-                response.tools_call_name = [tool_call_info["tool_name"]]
-                response.tools_call_args = [tool_call_info["parameters"]]
-                response.tools_call_ids = [tool_call_info["call_id"]]
-                response.result_chain = None
-                response.completion_text = ""
+            # 解析 JSON 格式的工具调用
+            for resp_json in extract_json(resp):
+                if "tool" in resp_json and "parameters" in resp_json:
+                    logger.debug("resp: " + resp)
+                    logger.debug(
+                        "name: "
+                        + resp_json["tool"]
+                        + ", args: "
+                        + str(resp_json["parameters"])
+                    )
+                    logger.info(
+                        "Model calling tool by ModelMcpBridge (JSON format), Converting."
+                    )
+                    response.tools_call_name = [resp_json["tool"]]
+                    response.tools_call_args = [resp_json["parameters"]]
+                    response.tools_call_ids = [resp_json["call_id"]]
+                    response.result_chain = None
+                    response.completion_text = ""
 
-                """
-                PART OF MONKEY PATCH
-                调用存储的Agent实例的_transition_state方法，将状态设置为RUNNING，以继续处理工具调用
-                """
-                AGENT_STORAGE.get_agent(id(response))._transition_state(
-                    AgentState.RUNNING
-                )
-            else:
-                # 如果不是 Gemini 格式，尝试解析 JSON 格式
-                for resp_json in extract_json(resp):
-                    if "tool" in resp_json and "parameters" in resp_json:
-                        logger.debug("resp: " + resp)
-                        logger.info(
-                            "Model calling tool by ModelMcpBridge (JSON format), Converting."
-                        )
-                        response.tools_call_name = [resp_json["tool"]]
-                        response.tools_call_args = [resp_json["parameters"]]
-                        response.tools_call_ids = [resp_json["call_id"]]
-                        response.result_chain = None
-                        response.completion_text = ""
-
-                        """
-                        PART OF MONKEY PATCH
-                        调用存储的Agent实例的_transition_state方法，将状态设置为RUNNING，以继续处理工具调用
-                        """
-                        AGENT_STORAGE.get_agent(id(response))._transition_state(
-                            AgentState.RUNNING
-                        )
+                    """
+                    PART OF MONKEY PATCH
+                    调用存储的Agent实例的_transition_state方法，将状态设置为RUNNING，以继续处理工具调用
+                    """
+                    AGENT_STORAGE.get_agent(id(response))._transition_state(
+                        AgentState.RUNNING
+                    )
+                    break  # 只处理第一个有效的工具调用
 
         """
         PART OF MONKEY PATCH
@@ -193,114 +179,6 @@ class ModelMcpBridge(Star):
         """
         ToolLoopAgentRunner._transition_state = self._transition_state_backup
 
-
-def _parse_gemini_tool_call(response_text: str) -> dict | None:
-    """解析 Gemini 的 tool_code 格式，支持前后缀文本"""
-
-    # 查找 ```tool_code 块，忽略前后的其他文本
-    tool_code_pattern = r"```tool_code\s*\n(.*?)\n```"
-    match = re.search(tool_code_pattern, response_text, re.DOTALL)
-
-    if not match:
-        return None
-
-    tool_code = match.group(1).strip()
-
-    # 记录完整的响应文本用于调试
-    logger.debug(f"Found tool_code block: {tool_code}")
-    logger.debug(f"Full response text: {response_text}")
-
-    try:
-        # 首先检查是否有外层的 print() 包装
-        print_pattern = r"print\s*\(\s*(.*)\s*\)\s*$"
-        print_match = re.match(print_pattern, tool_code, re.DOTALL)
-
-        if print_match:
-            # 如果有 print 包装，提取内部的函数调用
-            inner_code = print_match.group(1).strip()
-        else:
-            # 如果没有 print 包装，直接使用原始代码
-            inner_code = tool_code
-
-        # 解析函数调用格式，支持带点的函数名，例如: default_api.fetch_html(url = "...")
-        func_pattern = r"([a-zA-Z_][a-zA-Z0-9_.]*)\s*\((.*)\)"
-        func_match = re.match(func_pattern, inner_code, re.DOTALL)
-
-        if not func_match:
-            logger.debug(f"Failed to match function pattern in: {inner_code}")
-            return None
-
-        full_func_name = func_match.group(1)
-        args_str = func_match.group(2).strip()
-
-        # 提取实际的工具名（去掉前缀，如 default_api.）
-        if "." in full_func_name:
-            tool_name = full_func_name.split(".")[-1]  # 取最后一部分作为工具名
-        else:
-            tool_name = full_func_name
-
-        logger.debug(
-            f"Extracted tool name: {tool_name} from full name: {full_func_name}"
-        )
-
-        # 解析参数
-        parameters = {}
-        if args_str:
-            # 处理参数字符串，支持各种类型的参数
-            try:
-                # 构建一个可以被 ast.literal_eval 解析的字符串
-                # 将函数调用转换为字典格式
-                eval_str = f"dict({args_str})"
-                parameters = ast.literal_eval(eval_str)
-            except (ValueError, SyntaxError):
-                # 如果 ast.literal_eval 失败，尝试手动解析
-                parameters = _parse_function_args(args_str)
-
-        return {
-            "tool_name": tool_name,
-            "parameters": parameters,
-            "call_id": f"call_{hash(tool_code) % (10**20):020d}",  # 生成一个20位的call_id
-        }
-
-    except Exception as e:
-        logger.error(f"Failed to parse Gemini tool call: {e}")
-        return None
-
-
-def _parse_function_args(args_str: str) -> dict:
-    """手动解析函数参数字符串，支持带空格的参数格式"""
-    parameters = {}
-
-    # 改进的参数匹配模式，支持更多空格和复杂的字符串值
-    # 匹配格式: param = "value", param="value", param = 123, param=True 等
-    param_pattern = r'(\w+)\s*=\s*(["\']([^"\']*)["\']|[^,\s)]+)'
-
-    for match in re.finditer(param_pattern, args_str):
-        param_name = match.group(1)
-        param_value_full = match.group(2).strip()
-        param_value_inner = match.group(3)
-
-        # 如果是字符串（有引号）
-        if param_value_inner is not None:
-            parameters[param_name] = param_value_inner
-        else:
-            # 尝试转换为适当的类型
-            param_value = param_value_full
-            if param_value.lower() == "true":
-                parameters[param_name] = True
-            elif param_value.lower() == "false":
-                parameters[param_name] = False
-            elif param_value.lower() == "null" or param_value.lower() == "none":
-                parameters[param_name] = None
-            elif param_value.isdigit():
-                parameters[param_name] = int(param_value)
-            elif re.match(r"^\d+\.\d+$", param_value):
-                parameters[param_name] = float(param_value)
-            else:
-                parameters[param_name] = param_value
-
-    logger.debug(f"Parsed parameters: {parameters} from args_str: {args_str}")
-    return parameters
 
 
 def RawJSONDecoder(index):
