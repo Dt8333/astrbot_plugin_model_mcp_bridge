@@ -1,5 +1,5 @@
 name: model_mcp_bridge # 这是你的插件的唯一识别名。
 desc: 用于为不支持tool_use的模型提供一个调用MCP的途径的插件。 # 插件简短描述
-version: v1.1.0 # 插件版本号。格式：v1.1.1 或者 v1.1
+version: v1.1.1 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: Dt8333 # 作者
 repo: https://github.com/Dt8333/astrbot_plugin_model_mcp_bridge # 插件的仓库地址
