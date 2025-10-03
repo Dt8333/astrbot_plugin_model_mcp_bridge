@@ -7,10 +7,16 @@ from astrbot.api import logger, FunctionTool, ToolSet
 from astrbot.api.provider import ProviderRequest, LLMResponse, Provider
 from dataclasses import dataclass, field
 
+from astrbot.core.provider.entities import (
+    AssistantMessageSegment,
+    ToolCallMessageSegment,
+    ToolCallsResult,
+)
 from astrbot.core.provider.func_tool_manager import FunctionToolManager
 from astrbot.core.agent.runners.base import AgentState
 from astrbot.core.agent.runners import tool_loop_agent_runner
 from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
+import random
 
 """
 实现思路：
@@ -62,6 +68,11 @@ class ModelMcpBridge(Star):
         self.ModelSupportToolUse = (
             {}
         )  # 用于存储模型是否支持 tool_use 的字典，key 为模型名，value 为布尔值
+        self.ModelSupportToolResult = (
+            {}
+        )  # 用于存储模型是否支持 tool_result 的字典，key 为模型名，value 为布尔值
+
+
 
         """
         PART OF MONKEY PATCH
@@ -70,6 +81,24 @@ class ModelMcpBridge(Star):
         """
         self._transition_state_backup = ToolLoopAgentRunner._transition_state
         ToolLoopAgentRunner._transition_state = _patched_transition_state
+
+        """
+        动态替换 MAIN_AGENT_HOOKS
+        """
+        from astrbot.core.pipeline.process_stage.method.llm_request import MAIN_AGENT_HOOKS
+        self.original_main_agent_hooks = MAIN_AGENT_HOOKS
+
+        import astrbot.core.pipeline.process_stage.method.llm_request as llm_request_module
+        self.custom_hooks = CustomMainAgentHooks(self)
+        llm_request_module.MAIN_AGENT_HOOKS = self.custom_hooks
+
+        """
+        PART OF MONKEY PATCH
+        Monkey patch FunctionToolExecutor.execute 来捕获工具结果
+        """
+        from astrbot.core.pipeline.process_stage.method.llm_request import FunctionToolExecutor
+        self._original_execute = FunctionToolExecutor.execute
+        FunctionToolExecutor.execute = self._create_patched_execute()
 
     # 注册指令的装饰器。指令名为 mcpbridge。注册成功后，发送 `/mcpbridge` 就会触发这个指令，并回复 `你好, {user_name}!`
     @filter.command("mcpbridge")
@@ -170,6 +199,122 @@ class ModelMcpBridge(Star):
 
         return self.ModelSupportToolUse.get(key, False)
 
+    async def is_model_tool_result_support(
+        self, provider: Provider, model: str
+    ) -> bool:
+        """检查模型是否支持 tool_result 的示例函数"""
+        if model is None:
+            model = ""
+        key = provider.meta().id + "_" + model
+        if key not in self.ModelSupportToolResult:
+            MockToolset = ToolSet([MockTool()])
+            tool_call_info = AssistantMessageSegment(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call_24CHaracterLOngSTRPlains",
+                        "function": {
+                            "name": MockTool.name,
+                            "arguments": json.dumps(
+                                {
+                                    "input": str(
+                                        random.randint(100000, 999999)
+                                    )  # 随机输入，避免缓存
+                                }
+                            ),
+                        },
+                        "type": "function",
+                    }
+                ],
+                role="assistant",
+            )
+            tool_call_result = ToolCallsResult(
+                tool_calls_info=tool_call_info,
+                tool_calls_result=[
+                    ToolCallMessageSegment(
+                        role="tool",
+                        tool_call_id=tool_call_info.tool_calls[0]["id"],
+                        content="cpu temperature: 55",
+                    )
+                ],
+            )
+            llm_resp = await provider.text_chat(
+                prompt="What is the temperature of my CPU?",
+                system_prompt="You are a helpful assistant. Use get_cpu_temperature tool to answer the question.",
+                func_tool=MockToolset,
+                model=model,
+                tool_calls_result=tool_call_result,
+            )
+
+            if llm_resp.completion_text.find("55") == -1:
+                self.ModelSupportToolResult[key] = False
+            else:
+                self.ModelSupportToolResult[key] = True
+
+        return self.ModelSupportToolResult.get(key, False)
+
+    def _create_patched_execute(self):
+        """创建 patched 的 FunctionToolExecutor.execute 方法"""
+        original_execute = self._original_execute
+        custom_hooks = self.custom_hooks
+
+        @classmethod
+        async def patched_execute(cls, tool, run_context, **tool_args):
+            """执行函数调用的 patched 版本，会捕获工具结果"""
+            from mcp.types import CallToolResult
+
+            # 调用原始的 execute 方法
+            async for result in original_execute(tool, run_context, **tool_args):
+                if isinstance(result, CallToolResult):
+                    # ✅ 关键：在工具结果生成时立即存储
+                    if result.content:
+                        from mcp.types import TextContent, ImageContent, EmbeddedResource, TextResourceContents, BlobResourceContents
+
+                        content = result.content[0]
+                        if isinstance(content, TextContent):
+                            custom_hooks.current_tool_results[tool.name] = content.text
+                        elif isinstance(content, ImageContent):
+                            custom_hooks.current_tool_results[tool.name] = "[Image returned]"
+                        elif isinstance(content, EmbeddedResource):
+                            resource = content.resource
+                            if isinstance(resource, TextResourceContents):
+                                custom_hooks.current_tool_results[tool.name] = resource.text
+                            elif isinstance(resource, BlobResourceContents) and resource.mimeType and resource.mimeType.startswith("image/"):
+                                custom_hooks.current_tool_results[tool.name] = "[Image resource returned]"
+                            else:
+                                custom_hooks.current_tool_results[tool.name] = "返回的数据类型不受支持"
+                        else:
+                            custom_hooks.current_tool_results[tool.name] = str(content)
+
+                yield result
+
+        return patched_execute
+
+    def _convert_single_tool_result_to_text(self, tool_name, tool_args, tool_result) -> str:
+        """将单个工具调用结果转换为文本格式"""
+        try:
+            # 提取工具结果内容
+            if hasattr(tool_result, 'content') and tool_result.content:
+                from mcp.types import TextContent, ImageContent
+                if isinstance(tool_result.content[0], TextContent):
+                    result_content = tool_result.content[0].text
+                elif isinstance(tool_result.content[0], ImageContent):
+                    result_content = "[Image returned]"
+                else:
+                    result_content = str(tool_result.content[0])
+            else:
+                result_content = "No content returned"
+
+            return (
+                f"Tool Call: {tool_name}\n"
+                f"Arguments: {json.dumps(tool_args) if tool_args else '{}'}\n"
+                f"Result: {result_content}\n"
+                f"---"
+            )
+        except Exception as e:
+            logger.error(f"Error converting tool result to text: {e}")
+            return f"Tool Call: {tool_name}\nResult: Error processing result\n---"
+
     async def terminate(self):
         """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
 
@@ -178,6 +323,21 @@ class ModelMcpBridge(Star):
         恢复ToolLoopAgentRunner的_transition_state方法，以使其能在插件卸载后正常工作
         """
         ToolLoopAgentRunner._transition_state = self._transition_state_backup
+
+        """
+        PART OF MONKEY PATCH
+        恢复FunctionToolExecutor.execute方法
+        """
+        from astrbot.core.pipeline.process_stage.method.llm_request import FunctionToolExecutor
+        FunctionToolExecutor.execute = self._original_execute
+
+        """
+        恢复原始的 MAIN_AGENT_HOOKS
+        """
+        import astrbot.core.pipeline.process_stage.method.llm_request as llm_request_module
+        llm_request_module.MAIN_AGENT_HOOKS = self.original_main_agent_hooks
+
+
 
 
 
@@ -205,6 +365,78 @@ def extract_json(s, index=0):
             index = decoder.end
         except json.JSONDecodeError:
             index += 1
+
+
+class CustomMainAgentHooks:
+    """自定义的 MainAgentHooks，用于处理工具结果转换"""
+
+    def __init__(self, bridge_plugin):
+        self.bridge_plugin = bridge_plugin
+        self.current_tool_results = {}  # key: (tool_name, args_hash), value: content
+
+    async def on_agent_begin(self, run_context):
+        """Agent 开始时触发"""
+        pass
+
+    async def on_tool_start(self, run_context, tool, tool_args):
+        """工具开始执行时触发"""
+        # 清空之前的结果
+        key = (tool.name, hash(str(tool_args)))
+        self.current_tool_results.pop(key, None)
+
+    async def on_tool_end(self, run_context, tool, tool_args, tool_result):
+        """工具执行完成时触发，立即将工具结果追加到 prompt 中"""
+        try:
+            provider = run_context.context.provider
+            curr_req = run_context.context.curr_provider_request
+            model = curr_req.model
+
+            # 检查模型是否支持结构化工具调用结果
+            if not await self.bridge_plugin.is_model_tool_result_support(provider, model):
+                # 从存储中获取工具结果
+                tool_result_content = self.current_tool_results.get(tool.name)
+
+                if tool_result_content:
+                    # 构造工具结果文本
+                    tool_text = (
+                        f"Tool Call: {tool.name}\n"
+                        f"Arguments: {json.dumps(tool_args) if tool_args else '{}'}\n"
+                        f"Result: {tool_result_content}\n"
+                        f"---"
+                    )
+
+                    # 立即追加到当前请求的 prompt 中，为下次 LLM 调用做准备
+                    if curr_req.prompt:
+                        curr_req.prompt += f"\n\n{tool_text}"
+                    else:
+                        curr_req.prompt = tool_text
+
+                    # 清空结构化的工具调用结果，避免重复处理
+                    curr_req.tool_calls_result = None
+
+                    logger.debug(f"Appended tool result to prompt: {tool.name}")
+                else:
+                    logger.warning(f"No tool result found for tool: {tool.name}")
+
+            # ✅ 总是清理存储的结果，避免内存泄漏
+            # 不论模型是否支持工具调用结果，都要清理存储
+            self.current_tool_results.pop(tool.name, None)
+
+        except Exception as e:
+            logger.error(f"Error in on_tool_end hook: {e}")
+
+    async def on_agent_done(self, run_context, llm_response):
+        """Agent 完成时触发，只负责触发 OnLLMResponseEvent"""
+        try:
+            # 执行原有的事件钩子逻辑，让 onLlmResponse 检测并插入工具调用
+            from astrbot.core.star.star_handler import EventType
+            from astrbot.core.pipeline.context import call_event_hook
+            await call_event_hook(
+                run_context.event, EventType.OnLLMResponseEvent, llm_response
+            )
+            # 工具结果已在 on_tool_end 中立即处理并追加到 prompt
+        except Exception as e:
+            logger.error(f"Error in on_agent_done hook: {e}")
 
 
 def _patched_transition_state(self, new_state: AgentState) -> None:
@@ -240,4 +472,6 @@ class MockTool(FunctionTool):
     )
 
     async def run(self, input: str) -> str:
-        return f"Mock tool received input: {input}"
+        random.seed(hash(input))
+        cpu_temperature = random.randint(30, 80)
+        return f"cpu temperature: {cpu_temperature}"
