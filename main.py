@@ -110,8 +110,18 @@ class ModelMcpBridge(Star):
             event.get_messages()
         )  # 用户所发的消息的消息链 # from astrbot.api.message_components import *
         logger.info(message_chain)
+        provider = self.context.get_using_provider(event.unified_msg_origin)
+        if not provider:
+            yield event.plain_result("未找到当前使用的提供商")
+            return
+        model = provider.get_model() or ""
+        support_tool_use = await self.is_model_tool_use_support(provider, model)
+        support_tool_result = await self.is_model_tool_result_support(provider, model)
+        logger.info(
+            f"Provider: {provider.meta().id}, Model: {model}, Support tool_use: {support_tool_use}, Support tool_result: {support_tool_result}"
+        )
         yield event.plain_result(
-            f"Hello, {user_name}, 你发了 {message_str}!"
+            f"Provider:{provider.meta().id}, Model:{model}, Support tool_use:{support_tool_use}, Support tool_result:{support_tool_result}"
         )  # 发送一条纯文本消息
 
     @filter.on_llm_request(priority=-10001)
