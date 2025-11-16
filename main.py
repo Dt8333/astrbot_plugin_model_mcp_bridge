@@ -137,7 +137,7 @@ class ModelMcpBridge(Star):
                 toolSet = request.func_tool
 
             """Serialize the tool set to JSON format"""
-            jsonData = json.dumps(toolSet.openai_schema())
+            jsonData = json.dumps(toolSet.openai_schema(),ensure_ascii=False)
 
             if hasattr(request, "system_prompt"):
                 request.system_prompt += (
