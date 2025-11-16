@@ -441,7 +441,7 @@ class CustomMainAgentHooks:
             from astrbot.core.star.star_handler import EventType
             from astrbot.core.pipeline.context import call_event_hook
             await call_event_hook(
-                run_context.event, EventType.OnLLMResponseEvent, llm_response
+                run_context.context.event, EventType.OnLLMResponseEvent, llm_response
             )
             # 工具结果已在 on_tool_end 中立即处理并追加到 prompt
         except Exception as e:
