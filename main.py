@@ -1,11 +1,15 @@
 import json
 import re
-from astrbot.api.event import filter, AstrMessageEvent
+from typing import AsyncGenerator
+from astrbot.api.event import MessageChain, filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, FunctionTool, ToolSet
 from astrbot.api.provider import ProviderRequest, LLMResponse, Provider
 from dataclasses import dataclass, field
 
+from astrbot.core.agent.hooks import BaseAgentRunHooks
+from astrbot.core.agent.message import ToolCall
+from astrbot.core.astr_agent_context import AstrAgentContext
 from astrbot.core.provider.entities import (
     AssistantMessageSegment,
     ToolCallMessageSegment,
@@ -80,6 +84,8 @@ class ModelMcpBridge(Star):
         """
         self._transition_state_backup = ToolLoopAgentRunner._transition_state
         ToolLoopAgentRunner._transition_state = _patched_transition_state
+        self._original_handle_function_tools = ToolLoopAgentRunner._handle_function_tools
+        ToolLoopAgentRunner._handle_function_tools = self._create_patched_handle_function_tools()
 
         """
         动态替换 MAIN_AGENT_HOOKS
@@ -88,16 +94,9 @@ class ModelMcpBridge(Star):
         self.original_main_agent_hooks = MAIN_AGENT_HOOKS
 
         import astrbot.core.pipeline.process_stage.method.llm_request as llm_request_module
-        self.custom_hooks = CustomMainAgentHooks(self)
+        self.custom_hooks = CustomMainAgentHooks(self, self.original_main_agent_hooks)
         llm_request_module.MAIN_AGENT_HOOKS = self.custom_hooks
 
-        """
-        PART OF MONKEY PATCH
-        Monkey patch FunctionToolExecutor.execute 来捕获工具结果
-        """
-        from astrbot.core.pipeline.process_stage.method.llm_request import FunctionToolExecutor
-        self._original_execute = FunctionToolExecutor.execute
-        FunctionToolExecutor.execute = self._create_patched_execute()
 
     # 注册指令的装饰器。指令名为 mcpbridge。注册成功后，发送 `/mcpbridge` 就会触发这个指令，并回复 `你好, {user_name}!`
     @filter.command("mcpbridge")
@@ -220,20 +219,20 @@ class ModelMcpBridge(Star):
             tool_call_info = AssistantMessageSegment(
                 content="",
                 tool_calls=[
-                    {
-                        "id": "call_24CHaracterLOngSTRPlains",
-                        "function": {
-                            "name": MockTool.name,
-                            "arguments": json.dumps(
+                    ToolCall(
+                        id="call_24CHaracterLOngSTRPlains",
+                        function=ToolCall.FunctionBody(
+                            name=MockTool.name,
+                            arguments=json.dumps(
                                 {
                                     "input": str(
                                         random.randint(100000, 999999)
                                     )  # 随机输入，避免缓存
                                 }
                             ),
-                        },
-                        "type": "function",
-                    }
+                        ),
+                        type="function",
+                    )
                 ],
                 role="assistant",
             )
@@ -242,7 +241,7 @@ class ModelMcpBridge(Star):
                 tool_calls_result=[
                     ToolCallMessageSegment(
                         role="tool",
-                        tool_call_id=tool_call_info.tool_calls[0]["id"],
+                        tool_call_id=(tool_call_info.tool_calls)[0].id,
                         content="cpu temperature: 55",
                     )
                 ],
@@ -262,42 +261,48 @@ class ModelMcpBridge(Star):
 
         return self.ModelSupportToolResult.get(key, False)
 
-    def _create_patched_execute(self):
-        """创建 patched 的 FunctionToolExecutor.execute 方法"""
-        original_execute = self._original_execute
-        custom_hooks = self.custom_hooks
+    def _create_patched_handle_function_tools(self):
+        original_handle_function_tools = self._original_handle_function_tools
+        outer_self=self
 
-        @classmethod
-        async def patched_execute(cls, tool, run_context, **tool_args):
-            """执行函数调用的 patched 版本，会捕获工具结果"""
-            from mcp.types import CallToolResult
+        async def patched_handle_function_tools(
+            self,
+            req: ProviderRequest,
+            llm_response: LLMResponse,
+        ) -> AsyncGenerator[MessageChain | list[ToolCallMessageSegment], None]:
+            async for result in original_handle_function_tools(self, req, llm_response):
+                # 在这里处理工具调用结果
+                if isinstance(result, list):
+                    provider = self.provider
+                    model = req.model
 
-            # 调用原始的 execute 方法
-            async for result in original_execute(tool, run_context, **tool_args):
-                if isinstance(result, CallToolResult):
-                    # ✅ 关键：在工具结果生成时立即存储
-                    if result.content:
-                        from mcp.types import TextContent, ImageContent, EmbeddedResource, TextResourceContents, BlobResourceContents
+                    # 检查模型是否支持结构化工具调用结果
+                    if not await outer_self.is_model_tool_result_support(provider, model):
+                        for res in result:
+                            # 构造工具结果文本
+                            tool_text = (
+                                f"Tool Call: {llm_response.tools_call_name}\n"
+                                f"Arguments: {json.dumps(llm_response.tools_call_args) if llm_response.tools_call_args else '{}'}\n"
+                                f"Result: {res.content}\n"
+                                f"---"
+                            )
 
-                        content = result.content[0]
-                        if isinstance(content, TextContent):
-                            custom_hooks.current_tool_results[tool.name] = content.text
-                        elif isinstance(content, ImageContent):
-                            custom_hooks.current_tool_results[tool.name] = "[Image returned]"
-                        elif isinstance(content, EmbeddedResource):
-                            resource = content.resource
-                            if isinstance(resource, TextResourceContents):
-                                custom_hooks.current_tool_results[tool.name] = resource.text
-                            elif isinstance(resource, BlobResourceContents) and resource.mimeType and resource.mimeType.startswith("image/"):
-                                custom_hooks.current_tool_results[tool.name] = "[Image resource returned]"
+                            # 立即追加到当前请求的 prompt 中，为下次 LLM 调用做准备
+                            if req.prompt:
+                                req.prompt += f"\n\n{tool_text}"
                             else:
-                                custom_hooks.current_tool_results[tool.name] = "返回的数据类型不受支持"
+                                req.prompt = tool_text
+
+                            # 清空结构化的工具调用结果，避免重复处理
+                            req.tool_calls_result = None
+
+                            logger.debug(f"Appended tool result to prompt: {llm_response.tools_call_name}")
                         else:
-                            custom_hooks.current_tool_results[tool.name] = str(content)
+                            logger.warning(f"No tool result found for tool: {llm_response.tools_call_name}")
 
                 yield result
 
-        return patched_execute
+        return patched_handle_function_tools
 
     def _convert_single_tool_result_to_text(self, tool_name, tool_args, tool_result) -> str:
         """将单个工具调用结果转换为文本格式"""
@@ -333,12 +338,6 @@ class ModelMcpBridge(Star):
         """
         ToolLoopAgentRunner._transition_state = self._transition_state_backup
 
-        """
-        PART OF MONKEY PATCH
-        恢复FunctionToolExecutor.execute方法
-        """
-        from astrbot.core.pipeline.process_stage.method.llm_request import FunctionToolExecutor
-        FunctionToolExecutor.execute = self._original_execute
 
         """
         恢复原始的 MAIN_AGENT_HOOKS
@@ -346,6 +345,7 @@ class ModelMcpBridge(Star):
         import astrbot.core.pipeline.process_stage.method.llm_request as llm_request_module
         llm_request_module.MAIN_AGENT_HOOKS = self.original_main_agent_hooks
 
+        ToolLoopAgentRunner._handle_function_tools = self._original_handle_function_tools
 
 
 
@@ -376,76 +376,34 @@ def extract_json(s, index=0):
             index += 1
 
 
-class CustomMainAgentHooks:
+class CustomMainAgentHooks(BaseAgentRunHooks[AstrAgentContext]):
     """自定义的 MainAgentHooks，用于处理工具结果转换"""
 
-    def __init__(self, bridge_plugin):
+    self_outer:"CustomMainAgentHooks"
+
+    def __init__(self, bridge_plugin:ModelMcpBridge, origin_hook:BaseAgentRunHooks[AstrAgentContext]):
+        self.origin_hook = origin_hook
         self.bridge_plugin = bridge_plugin
         self.current_tool_results = {}  # key: (tool_name, args_hash), value: content
 
     async def on_agent_begin(self, run_context):
         """Agent 开始时触发"""
-        pass
+        await self.origin_hook.on_agent_begin(run_context)
 
     async def on_tool_start(self, run_context, tool, tool_args):
         """工具开始执行时触发"""
         # 清空之前的结果
         key = (tool.name, hash(str(tool_args)))
         self.current_tool_results.pop(key, None)
+        await self.origin_hook.on_tool_start(run_context, tool, tool_args)
 
     async def on_tool_end(self, run_context, tool, tool_args, tool_result):
         """工具执行完成时触发，立即将工具结果追加到 prompt 中"""
-        try:
-            provider = run_context.context.provider
-            curr_req = run_context.context.curr_provider_request
-            model = curr_req.model
-
-            # 检查模型是否支持结构化工具调用结果
-            if not await self.bridge_plugin.is_model_tool_result_support(provider, model):
-                # 从存储中获取工具结果
-                tool_result_content = self.current_tool_results.get(tool.name)
-
-                if tool_result_content:
-                    # 构造工具结果文本
-                    tool_text = (
-                        f"Tool Call: {tool.name}\n"
-                        f"Arguments: {json.dumps(tool_args) if tool_args else '{}'}\n"
-                        f"Result: {tool_result_content}\n"
-                        f"---"
-                    )
-
-                    # 立即追加到当前请求的 prompt 中，为下次 LLM 调用做准备
-                    if curr_req.prompt:
-                        curr_req.prompt += f"\n\n{tool_text}"
-                    else:
-                        curr_req.prompt = tool_text
-
-                    # 清空结构化的工具调用结果，避免重复处理
-                    curr_req.tool_calls_result = None
-
-                    logger.debug(f"Appended tool result to prompt: {tool.name}")
-                else:
-                    logger.warning(f"No tool result found for tool: {tool.name}")
-
-            # ✅ 总是清理存储的结果，避免内存泄漏
-            # 不论模型是否支持工具调用结果，都要清理存储
-            self.current_tool_results.pop(tool.name, None)
-
-        except Exception as e:
-            logger.error(f"Error in on_tool_end hook: {e}")
+        await self.origin_hook.on_tool_end(run_context,tool,tool_args,tool_result)
 
     async def on_agent_done(self, run_context, llm_response):
         """Agent 完成时触发，只负责触发 OnLLMResponseEvent"""
-        try:
-            # 执行原有的事件钩子逻辑，让 onLlmResponse 检测并插入工具调用
-            from astrbot.core.star.star_handler import EventType
-            from astrbot.core.pipeline.context import call_event_hook
-            await call_event_hook(
-                run_context.context.event, EventType.OnLLMResponseEvent, llm_response
-            )
-            # 工具结果已在 on_tool_end 中立即处理并追加到 prompt
-        except Exception as e:
-            logger.error(f"Error in on_agent_done hook: {e}")
+        await self.origin_hook.on_agent_done(run_context, llm_response)
 
 
 def _patched_transition_state(self, new_state: AgentState) -> None:
