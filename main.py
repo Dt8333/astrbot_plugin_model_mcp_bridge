@@ -56,7 +56,7 @@ AGENT_STORAGE = AgentStorage()
     "model_mcp_bridge",
     "Dt8333",
     "一个用于为不支持tool_use的模型提供一个调用MCP的途径的插件",
-    "1.1.1",
+    "1.1.2",
 )
 class ModelMcpBridge(Star):
     def __init__(self, context: Context):
